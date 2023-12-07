@@ -114,7 +114,7 @@ void mem2reg(LLVMIR::L_func* fun) {
         for (auto it = instrs.begin(); it != instrs.end();) {
             L_stm* stm = *it;
             if (stm->type == L_StmKind::T_ALLOCA) {
-                printf("1\n");
+                printf("Alloca 1\n");
                 // 直接删除,it指向下一个
                 if (is_mem_variable(stm)) {
                     nameCover[stm->u.ALLOCA->dst] = nullptr;
@@ -123,7 +123,7 @@ void mem2reg(LLVMIR::L_func* fun) {
                     it++;
                 }
             } else if (stm->type == L_StmKind::T_LOAD) {
-                printf("2\n");
+                printf("Load 2\n");
                 // dst = load from ptr
                 AS_operand *dst = stm->u.LOAD->dst, *ptr = stm->u.LOAD->ptr;
                 // 如果ptr是个标量，需要删除。
@@ -134,7 +134,7 @@ void mem2reg(LLVMIR::L_func* fun) {
                     it++;
                 }
             } else if (stm->type == L_StmKind::T_STORE) {
-                printf("3\n");
+                printf("STORE 3\n");
                 // store i32 %src, i32* %ptr
                 L_store* store = stm->u.STORE;
                 AS_operand *src = store->src, *ptr = store->ptr;
@@ -143,10 +143,12 @@ void mem2reg(LLVMIR::L_func* fun) {
                     continue;
                 }
                 if (src->kind == OperandKind::ICONST) {
-                    // 删除store，移到下一条指令
+                    // 删除store
                     it = instrs.erase(it);
                     // 添加move,
-                    instrs.insert(it, L_Move(ptr, src));
+                    it = instrs.insert(it, L_Move(ptr, src));
+                    // 移到下一条指令
+                    it++;
                 } else if (src->kind == OperandKind::TEMP) {
                     nameCover[src] = ptr;
                     // 自动移动到下一条指令
@@ -156,7 +158,7 @@ void mem2reg(LLVMIR::L_func* fun) {
                     assert(0);
                 }
             } else {
-                printf("4\n");
+                printf("eLSE 4\n");
                 it++;
             }
         }
@@ -325,6 +327,9 @@ void cover(AS_operand* cur,
     }
     // 递归查找到最深处的Asoprand
     AS_operand* root = nameCover[cur];
+    if (root == nullptr) {
+        return;  // 本身就是根元素，无需覆盖,别人得跟他叫一个名
+    }
     int level = 0;
     while (nameCover[root] != nullptr) {
         root = nameCover[root];
