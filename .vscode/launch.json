@@ -9,7 +9,7 @@
             "request": "launch",
             "name": "C/C++: clang++ build active file",
             "program": "macos_compiler",
-            "args": ["${workspaceFolder}/src/test/BFS.tea"],
+            "args": ["${workspaceFolder}/src/temp/BFS.tea"],
             "cwd": "${workspaceFolder}",
             "preLaunchTask": "C/C++: clang++ build active file"
         }
