@@ -35,25 +35,27 @@ static void init_table() {
 }
 
 LLVMIR::L_prog* SSA(LLVMIR::L_prog* prog) {
+    int i = 0;
     for (auto& fun : prog->funcs) {
+        printf("ssa : block %d\n", i++);
         init_table();
-        // 让所有AS_operand* 指向同一块 AS_operand 实例
+        // AS_operand* 指向同一块 AS_operand 实例
         combine_addr(fun);
         mem2reg(fun);
-        auto RA_bg = Create_bg(fun->blocks);
-        SingleSourceGraph(RA_bg.mynodes[0], RA_bg, fun);
-        // Show_graph(stdout,RA_bg);
-        Liveness(RA_bg.mynodes[0], RA_bg, fun->args);
-        Dominators(RA_bg);
-        // printf_domi();
-        tree_Dominators(RA_bg);
-        // printf_D_tree();
-        // 默认0是入口block
-        computeDF(RA_bg, RA_bg.mynodes[0]);
-        // printf_DF();
-        Place_phi_fu(RA_bg, fun);
-        Rename(RA_bg);
-        combine_addr(fun);
+        // auto RA_bg = Create_bg(fun->blocks);
+        // SingleSourceGraph(RA_bg.mynodes[0], RA_bg,fun);
+        // // Show_graph(stdout,RA_bg);
+        // Liveness(RA_bg.mynodes[0], RA_bg, fun->args);
+        // Dominators(RA_bg);
+        // // printf_domi();
+        // tree_Dominators(RA_bg);
+        // // printf_D_tree();
+        // // 默认0是入口block
+        // computeDF(RA_bg, RA_bg.mynodes[0]);
+        // // printf_DF();
+        // Place_phi_fu(RA_bg, fun);
+        // Rename(RA_bg);
+        // combine_addr(fun);
     }
     return prog;
 }
@@ -106,44 +108,56 @@ void mem2reg(LLVMIR::L_func* fun) {
     // nameCover[a] = nullptr ，说明a寄存器已经是根，无法替代
 
     // 寻找标量，并且记录寄存器序号覆盖关系
+    int n = 0;
     for (L_block* block : fun->blocks) {
         list<L_stm*>& instrs = block->instrs;
         for (auto it = instrs.begin(); it != instrs.end();) {
             L_stm* stm = *it;
             if (stm->type == L_StmKind::T_ALLOCA) {
+                printf("1\n");
                 // 直接删除,it指向下一个
                 if (is_mem_variable(stm)) {
                     nameCover[stm->u.ALLOCA->dst] = nullptr;
                     it = instrs.erase(it);
+                } else {
+                    it++;
                 }
             } else if (stm->type == L_StmKind::T_LOAD) {
+                printf("2\n");
                 // dst = load from ptr
                 AS_operand *dst = stm->u.LOAD->dst, *ptr = stm->u.LOAD->ptr;
                 // 如果ptr是个标量，需要删除。
                 if (isScalar(ptr)) {
                     nameCover[dst] = ptr;
-                    instrs.erase(it);
+                    it = instrs.erase(it);
+                } else {
+                    it++;
                 }
             } else if (stm->type == L_StmKind::T_STORE) {
+                printf("3\n");
                 // store i32 %src, i32* %ptr
                 L_store* store = stm->u.STORE;
                 AS_operand *src = store->src, *ptr = store->ptr;
                 if (!isScalar(ptr)) {
+                    it++;
                     continue;
                 }
                 if (src->kind == OperandKind::ICONST) {
-                    // 删除store，添加move
-                    instrs.erase(it);
+                    // 删除store，移到下一条指令
+                    it = instrs.erase(it);
+                    // 添加move,
                     instrs.insert(it, L_Move(ptr, src));
-                    it++;  // 重新移到下一条指令
                 } else if (src->kind == OperandKind::TEMP) {
                     nameCover[src] = ptr;
                     // 自动移动到下一条指令
-                    instrs.erase(it);
+                    it = instrs.erase(it);
                 } else {
                     // 不可能是全局变量store进来
                     assert(0);
                 }
+            } else {
+                printf("4\n");
+                it++;
             }
         }
     }
@@ -151,7 +165,7 @@ void mem2reg(LLVMIR::L_func* fun) {
     // 名字更改
     for (L_block* block : fun->blocks) {
         list<L_stm*>& instrs = block->instrs;
-        for (auto it = instrs.begin(); it != instrs.end();) {
+        for (auto it = instrs.begin(); it != instrs.end(); it++) {
             L_stm* stm = *it;
             switch (stm->type) {
                 case L_StmKind::T_BINOP: {
@@ -311,8 +325,10 @@ void cover(AS_operand* cur,
     }
     // 递归查找到最深处的Asoprand
     AS_operand* root = nameCover[cur];
+    int level = 0;
     while (nameCover[root] != nullptr) {
         root = nameCover[root];
+        printf("cover level: %d\n", level++);
     }
     cur->u.TEMP = root->u.TEMP;
 }
