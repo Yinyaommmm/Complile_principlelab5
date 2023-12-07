@@ -146,7 +146,7 @@ void mem2reg(LLVMIR::L_func* fun) {
                     // 删除store
                     it = instrs.erase(it);
                     // 添加move,
-                    it = instrs.insert(it, L_Move(ptr, src));
+                    it = instrs.insert(it, L_Move(src, ptr));
                     // 移到下一条指令
                     it++;
                 } else if (src->kind == OperandKind::TEMP) {
@@ -313,7 +313,7 @@ void Rename(GRAPH::Graph<LLVMIR::L_block*>& bg) {
 }
 
 bool isScalar(AS_operand* a) {
-    return a->kind == OperandKind::TEMP &&
+    return a && a->kind == OperandKind::TEMP &&
            a->u.TEMP->type == TempType::INT_PTR && a->u.TEMP->len == 0;
 }
 // mem2reg中名字覆盖(temp_temp改至一样)
