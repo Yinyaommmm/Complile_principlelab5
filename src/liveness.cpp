@@ -1,421 +1,350 @@
 #include "liveness.h"
-#include <cassert>
-#include <iostream>
-#include <list>
-#include <stack>
-#include <string>
 #include <unordered_map>
 #include <unordered_set>
-#include <vector>
-#include "bg_llvm.h"
 #include "graph.hpp"
-#include "printLLVM.h"
-#include "ssa.h"
+#include "llvm_ir.h"
+#include "temp.h"
 
 using namespace std;
 using namespace LLVMIR;
 using namespace GRAPH;
-struct imm_Dominator {
-    LLVMIR::L_block* pred;
-    unordered_set<LLVMIR::L_block*> succs;
+
+struct inOut {
+    TempSet_ in;
+    TempSet_ out;
 };
 
-unordered_map<L_block*, unordered_set<L_block*>> dominators;
-unordered_map<L_block*, imm_Dominator> tree_dominators;
-unordered_map<L_block*, unordered_set<L_block*>> DF_array;
-unordered_map<L_block*, Node<LLVMIR::L_block*>*> revers_graph;
-unordered_map<Temp_temp*, AS_operand*> temp2ASoper;
+struct useDef {
+    TempSet_ use;
+    TempSet_ def;
+};
 
-static void init_table() {
-    dominators.clear();
-    tree_dominators.clear();
-    DF_array.clear();
-    revers_graph.clear();
-    temp2ASoper.clear();
-}
+static unordered_map<GRAPH::Node<LLVMIR::L_block*>*, inOut> InOutTable;
+static unordered_map<GRAPH::Node<LLVMIR::L_block*>*, useDef> UseDefTable;
 
-LLVMIR::L_prog* SSA(LLVMIR::L_prog* prog) {
-    int i = 0;
-    for (auto& fun : prog->funcs) {
-        printf("-------------ssa : block %d-------------\n", i++);
-        init_table();
-        // AS_operand* 指向同一块 AS_operand 实例
-        combine_addr(fun);
-        mem2reg(fun);
-        auto RA_bg = Create_bg(fun->blocks);
-        SingleSourceGraph(RA_bg.mynodes[0], RA_bg, fun);
-        // Show_graph(stdout,RA_bg);
-        Liveness(RA_bg.mynodes[0], RA_bg, fun->args);
-        Dominators(RA_bg);
-        printf_domi();
-        // tree_Dominators(RA_bg);
-        // // printf_D_tree();
-        // // 默认0是入口block
-        // computeDF(RA_bg, RA_bg.mynodes[0]);
-        // // printf_DF();
-        // Place_phi_fu(RA_bg, fun);
-        // Rename(RA_bg);
-        // combine_addr(fun);
-    }
-    return prog;
-}
+list<AS_operand**> get_all_AS_operand(L_stm* stm) {
+    list<AS_operand**> AS_operand_list;
+    switch (stm->type) {
+        case L_StmKind::T_BINOP: {
+            AS_operand_list.push_back(&(stm->u.BINOP->left));
+            AS_operand_list.push_back(&(stm->u.BINOP->right));
+            AS_operand_list.push_back(&(stm->u.BINOP->dst));
 
-static bool is_mem_variable(L_stm* stm) {
-    return stm->type == L_StmKind::T_ALLOCA &&
-           stm->u.ALLOCA->dst->kind == OperandKind::TEMP &&
-           stm->u.ALLOCA->dst->u.TEMP->type == TempType::INT_PTR &&
-           stm->u.ALLOCA->dst->u.TEMP->len == 0;
-}
-
-// 保证相同的AS_operand,地址一样 。常量除外
-void combine_addr(LLVMIR::L_func* fun) {
-    unordered_map<Temp_temp*, unordered_set<AS_operand**>> temp_set;
-    unordered_map<Name_name*, unordered_set<AS_operand**>> name_set;
-    for (auto& block : fun->blocks) {
-        for (auto& stm : block->instrs) {
-            // 获取ir句子里的AS operand**
-            auto AS_operand_list = get_all_AS_operand(stm);
-            for (auto AS_op : AS_operand_list) {
-                // 记录变量对应的AS_oprand**
-                if ((*AS_op)->kind == OperandKind::TEMP) {
-                    temp_set[(*AS_op)->u.TEMP].insert(AS_op);
-                } else if ((*AS_op)->kind == OperandKind::NAME) {
-                    name_set[(*AS_op)->u.NAME].insert(AS_op);
-                }
+        } break;
+        case L_StmKind::T_LOAD: {
+            AS_operand_list.push_back(&(stm->u.LOAD->dst));
+            AS_operand_list.push_back(&(stm->u.LOAD->ptr));
+        } break;
+        case L_StmKind::T_STORE: {
+            AS_operand_list.push_back(&(stm->u.STORE->src));
+            AS_operand_list.push_back(&(stm->u.STORE->ptr));
+        } break;
+        case L_StmKind::T_LABEL: {
+        } break;
+        case L_StmKind::T_JUMP: {
+        } break;
+        case L_StmKind::T_CMP: {
+            AS_operand_list.push_back(&(stm->u.CMP->left));
+            AS_operand_list.push_back(&(stm->u.CMP->right));
+            AS_operand_list.push_back(&(stm->u.CMP->dst));
+        } break;
+        case L_StmKind::T_CJUMP: {
+            AS_operand_list.push_back(&(stm->u.CJUMP->dst));
+        } break;
+        case L_StmKind::T_MOVE: {
+            AS_operand_list.push_back(&(stm->u.MOVE->src));
+            AS_operand_list.push_back(&(stm->u.MOVE->dst));
+        } break;
+        case L_StmKind::T_CALL: {
+            AS_operand_list.push_back(&(stm->u.CALL->res));
+            for (auto& arg : stm->u.CALL->args) {
+                AS_operand_list.push_back(&arg);
             }
+        } break;
+        case L_StmKind::T_VOID_CALL: {
+            for (auto& arg : stm->u.VOID_CALL->args) {
+                AS_operand_list.push_back(&arg);
+            }
+        } break;
+        case L_StmKind::T_RETURN: {
+            if (stm->u.RET->ret != nullptr)
+                AS_operand_list.push_back(&(stm->u.RET->ret));
+        } break;
+        case L_StmKind::T_PHI: {
+            AS_operand_list.push_back(&(stm->u.PHI->dst));
+            for (auto& phi : stm->u.PHI->phis) {
+                AS_operand_list.push_back(&(phi.first));
+            }
+        } break;
+        case L_StmKind::T_ALLOCA: {
+            AS_operand_list.push_back(&(stm->u.ALLOCA->dst));
+        } break;
+        case L_StmKind::T_GEP: {
+            AS_operand_list.push_back(&(stm->u.GEP->new_ptr));
+            AS_operand_list.push_back(&(stm->u.GEP->base_ptr));
+            AS_operand_list.push_back(&(stm->u.GEP->index));
+        } break;
+        default: {
+            printf("%d\n", (int)stm->type);
+            assert(0);
         }
     }
-    for (auto temp : temp_set) {
-        // 所有同一个变量的AS_oprand
-        AS_operand* fi_AS_op = **temp.second.begin();
-        for (auto AS_op : temp.second) {
-            *AS_op = fi_AS_op;
-        }
-    }
-    for (auto name : name_set) {
-        AS_operand* fi_AS_op = **name.second.begin();
-        for (auto AS_op : name.second) {
-            *AS_op = fi_AS_op;
-        }
-    }
+    return AS_operand_list;
 }
 
-void mem2reg(LLVMIR::L_func* fun) {
+void append(std::list<AS_operand**>& list, AS_operand*& value) {
+    if (value == nullptr) {
+        return;
+    }
+    if (value->kind != OperandKind::TEMP) {
+        return;
+    }
+    list.push_back(&value);
+}
+
+std::list<AS_operand**> get_def_operand(L_stm* stm) {
     //   Todo
+    list<AS_operand**> defList;
+    switch (stm->type) {
+        case L_StmKind::T_BINOP: {
+            append(defList, (stm->u.BINOP->dst));
+        } break;
+        case L_StmKind::T_LOAD: {
+            append(defList, (stm->u.LOAD->dst));
+        } break;
+        case L_StmKind::T_CMP: {
+            append(defList, (stm->u.CMP->dst));
+        } break;
+        case L_StmKind::T_MOVE: {
+            append(defList, (stm->u.MOVE->dst));
+        } break;
+        case L_StmKind::T_CALL: {
+            append(defList, (stm->u.CALL->res));
+        } break;
+        case L_StmKind::T_PHI: {
+            append(defList, (stm->u.PHI->dst));
+        } break;
+        case L_StmKind::T_ALLOCA: {
+            append(defList, (stm->u.ALLOCA->dst));
+        } break;
+        case L_StmKind::T_GEP: {
+            append(defList, (stm->u.GEP->new_ptr));
+        } break;
+        default: {
+        }
+    }
+    return defList;
+}
 
-    unordered_map<AS_operand*, AS_operand*> nameCover;
-    // nameCover[a] = b,说明a寄存器的位置可用b寄存器替代
-    // nameCover[a] = nullptr ，说明a寄存器已经是根，无法替代
+// 获得语句中左值变量（定义的变量）
+list<Temp_temp*> get_def(L_stm* stm) {
+    auto AS_operand_list = get_def_operand(stm);
+    list<Temp_temp*> Temp_list;
+    for (auto AS_op : AS_operand_list) {
+        Temp_list.push_back((*AS_op)->u.TEMP);
+    }
+    return Temp_list;
+}
 
-    // 寻找标量，并且记录寄存器序号覆盖关系
-    int n = 0;
-    for (L_block* block : fun->blocks) {
-        list<L_stm*>& instrs = block->instrs;
-        for (auto it = instrs.begin(); it != instrs.end();) {
-            L_stm* stm = *it;
-            if (stm->type == L_StmKind::T_ALLOCA) {
-                // 直接删除,it指向下一个
-                if (is_mem_variable(stm)) {
-                    AS_operand* dst = stm->u.ALLOCA->dst;
-                    AS_operand* int0 = AS_Operand_Const(0);
-                    nameCover[stm->u.ALLOCA->dst] = nullptr;
-                    it = instrs.erase(it);
-                    it = instrs.insert(it, L_Move(int0, dst));
-                    // 移到下一条指令
-                    it++;
-                } else {
-                    it++;
-                }
-            } else if (stm->type == L_StmKind::T_LOAD) {
-                // dst = load from ptr
-                AS_operand *dst = stm->u.LOAD->dst, *ptr = stm->u.LOAD->ptr;
-                // 如果ptr是个标量，需要删除。
-                if (isScalar_Alloca(ptr)) {
-                    nameCover[dst] = ptr;
-                    it = instrs.erase(it);
-                } else {
-                    it++;
-                }
-            } else if (stm->type == L_StmKind::T_STORE) {
-                // store i32 %src, i32* %ptr
-                L_store* store = stm->u.STORE;
-                AS_operand *src = store->src, *ptr = store->ptr;
-                if (!isScalar_Alloca(ptr)) {
-                    it++;
-                    continue;
-                }
-                if (src->kind == OperandKind::ICONST) {
-                    // 删除store
-                    it = instrs.erase(it);
-                    // 添加move,
-                    it = instrs.insert(it, L_Move(src, ptr));
-                    // 移到下一条指令
-                    it++;
-                } else if (src->kind == OperandKind::TEMP) {
-                    nameCover[src] = ptr;
-                    // 自动移动到下一条指令
-                    it = instrs.erase(it);
-                    // 添加move,
-                    it = instrs.insert(it, L_Move(src, ptr));
-                    // 移到下一条指令
-                    it++;
-                } else {
-                    // 不可能是全局变量store进来
-                    assert(0);
-                }
-            } else {
-                it++;
+// 获得语句中使用的变量
+std::list<AS_operand**> get_use_operand(L_stm* stm) {
+    std::list<AS_operand**> useList;
+    switch (stm->type) {
+        case L_StmKind::T_BINOP:
+            append(useList, stm->u.BINOP->left);
+            append(useList, stm->u.BINOP->right);
+            break;
+
+        case L_StmKind::T_CALL:
+            for (AS_operand*& arg : stm->u.CALL->args) {
+                append(useList, arg);
+            }
+            break;
+
+        case L_StmKind::T_CJUMP:
+            append(useList, stm->u.CJUMP->dst);
+            break;
+
+        case L_StmKind::T_CMP:
+            append(useList, stm->u.CMP->left);
+            append(useList, stm->u.CMP->right);
+            break;
+
+        case L_StmKind::T_GEP:
+            append(useList, stm->u.GEP->base_ptr);
+            break;
+
+        case L_StmKind::T_LOAD:
+            append(useList, stm->u.LOAD->ptr);
+            break;
+
+        case L_StmKind::T_MOVE:
+            append(useList, stm->u.MOVE->src);
+            break;
+
+        case L_StmKind::T_RETURN:
+            append(useList, stm->u.RET->ret);
+            break;
+
+        case L_StmKind::T_STORE:
+            append(useList, stm->u.STORE->src);
+            break;
+
+        case L_StmKind::T_VOID_CALL:
+            for (AS_operand*& arg : stm->u.VOID_CALL->args) {
+                append(useList, arg);
+            }
+            break;
+
+        default:
+            break;
+    }
+    return useList;
+}
+
+// 拿到一条命令中使用的寄存器(编号)
+list<Temp_temp*> get_use(L_stm* stm) {
+    auto AS_operand_list = get_use_operand(stm);
+    list<Temp_temp*> Temp_list;
+    for (auto AS_op : AS_operand_list) {
+        Temp_list.push_back((*AS_op)->u.TEMP);
+    }
+    return Temp_list;
+}
+
+static void init_INOUT() {
+    InOutTable.clear();
+    UseDefTable.clear();
+}
+
+TempSet_& FG_Out(GRAPH::Node<LLVMIR::L_block*>* r) {
+    return InOutTable[r].out;
+}
+TempSet_& FG_In(GRAPH::Node<LLVMIR::L_block*>* r) {
+    return InOutTable[r].in;
+}
+TempSet_& FG_def(GRAPH::Node<LLVMIR::L_block*>* r) {
+    return UseDefTable[r].def;
+}
+TempSet_& FG_use(GRAPH::Node<LLVMIR::L_block*>* r) {
+    return UseDefTable[r].use;
+}
+
+static void Use_def(GRAPH::Node<LLVMIR::L_block*>* r,
+                    GRAPH::Graph<LLVMIR::L_block*>& bg,
+                    std::vector<Temp_temp*>& args) {
+    //    args的作用尚不明确
+    int dyeColor = 100;
+    r->color = dyeColor;
+    // 获取该block的Use & Def
+    useDef curBlockUD = useDef();
+    for (LLVMIR::L_stm* instr : r->info->instrs) {
+        // 获取语句的def
+        list<Temp_temp*> defTempList = get_def(instr);
+        // 插入def
+        for (auto it = defTempList.begin(); it != defTempList.end(); it++) {
+            curBlockUD.def.insert(*it);
+        }
+        list<Temp_temp*> useTempList = get_use(instr);
+        // 插入use，但不能是def的
+        for (auto it = useTempList.begin(); it != useTempList.end(); it++) {
+            if (!curBlockUD.def.count(*it)) {
+                curBlockUD.use.insert(*it);
             }
         }
     }
+    // 插入useDefTable
+    UseDefTable[r] = curBlockUD;
 
-    // 名字更改
-    for (L_block* block : fun->blocks) {
-        list<L_stm*>& instrs = block->instrs;
-        for (auto it = instrs.begin(); it != instrs.end(); it++) {
-            L_stm* stm = *it;
-            switch (stm->type) {
-                case L_StmKind::T_BINOP: {
-                    L_binop* binop = stm->u.BINOP;
-                    AS_operand *left = binop->left, *right = binop->right,
-                               *dst = binop->dst;
-                    cover(left, nameCover);
-                    cover(right, nameCover);
-                    cover(dst, nameCover);
-                } break;
-                case L_StmKind::T_LOAD:
-                case L_StmKind::T_LABEL:
-                case L_StmKind::T_JUMP:
-                    break;
-                case L_StmKind::T_STORE: {
-                    L_store* store = stm->u.STORE;
-                    // src可以替换
-                    cover(store->src, nameCover);
-                } break;
-                case L_StmKind::T_CMP: {
-                    L_cmp* cmp = stm->u.CMP;
-                    AS_operand *left = cmp->left, *right = cmp->right,
-                               *dst = cmp->dst;
-                    cover(left, nameCover);
-                    cover(right, nameCover);
-                    cover(dst, nameCover);
-                } break;
-                case L_StmKind::T_CJUMP: {
-                    cover(stm->u.CJUMP->dst, nameCover);
-                } break;
-                case L_StmKind::T_MOVE: {
-                    cover(stm->u.MOVE->src, nameCover);
-                    cover(stm->u.MOVE->dst, nameCover);
-                } break;
-                case L_StmKind::T_CALL: {
-                    cover(stm->u.CALL->res, nameCover);
-                    for (AS_operand*& arg : stm->u.CALL->args) {
-                        cover(arg, nameCover);
-                    }
-                } break;
-                case L_StmKind::T_VOID_CALL: {
-                    for (AS_operand*& arg : stm->u.VOID_CALL->args) {
-                        cover(arg, nameCover);
-                    }
-                } break;
-                case L_StmKind::T_RETURN: {
-                    cover(stm->u.RET->ret, nameCover);
-                } break;
-                case L_StmKind::T_PHI:
-                case L_StmKind::T_NULL:
-                case L_StmKind::T_ALLOCA:
-                    break;
-                case L_StmKind::T_GEP: {
-                    cover(stm->u.GEP->base_ptr, nameCover);
-                    cover(stm->u.GEP->index, nameCover);
-                    cover(stm->u.GEP->new_ptr, nameCover);
-                } break;
-                default:
-                    break;
-            }
+    // 继续对未染色节点深搜
+    for (auto succId : r->succs) {
+        if (bg.mynodes[succId]->color != dyeColor) {
+            Use_def(bg.mynodes[succId], bg, args);
         }
     }
 }
-
-bool DominatorIteration(GRAPH::Node<LLVMIR::L_block*>* r,
-                        GRAPH::Graph<LLVMIR::L_block*>& bg,
-                        int iterTimes) {
-    int dyeColor = 99999 + iterTimes;
-    // 为自身染色
+static int gi = 0;
+static bool LivenessIteration(GRAPH::Node<LLVMIR::L_block*>* r,
+                              GRAPH::Graph<LLVMIR::L_block*>& bg) {
+    // 染色
+    int dyeColor = 299 + gi;
     r->color = dyeColor;
+    // 针对自身进行iteration
+    // 1. 新建元素的inOut，如果已经有了则不插入
+    InOutTable.emplace(r, inOut());
+    // 2. 更新in和out
+    TempSet_& in = InOutTable[r].in;
+    TempSet_& out = InOutTable[r].out;
+    TempSet_& use = UseDefTable[r].use;
+    TempSet_& def = UseDefTable[r].def;
+    // 2.1 新in
+    TempSet outdefDiff = TempSet_diff(&out, &def);
+    TempSet newIn = TempSet_union(&use, outdefDiff);
+    // 2.2 新out
+    TempSet newOut = new TempSet_;
 
-    // 创建新Dom
-    unordered_set<L_block*> newDom;
-    newDom.emplace(r->info);
-    // 得到前驱的交集
-    unordered_set<L_block*> predIntersection;
-    for (int predId : r->preds) {
-        GRAPH::Node<LLVMIR::L_block*>* node = bg.mynodes[predId];
-        predIntersection =
-            dom_intersection(predIntersection, dominators[node->info]);
-    }
-    // 得到新Dom的完全体
-    newDom = dom_union(newDom, predIntersection);
-    // 判断自身是否发生变化
-    bool needMoreIter = false;
-    unordered_set<L_block*>& curDom = dominators[r->info];
-    // needMoreIter = needMoreIter || !dom_eq(curDom, newDom);
-    needMoreIter = needMoreIter || (curDom != newDom);  // set直接用==判断
-
-    // 深搜遍历其余节点
     for (int succId : r->succs) {
-        GRAPH::Node<LLVMIR::L_block*>* node = bg.mynodes[succId];
-        if (node->color != dyeColor) {
-            needMoreIter =
-                needMoreIter || DominatorIteration(node, bg, iterTimes);
+        GRAPH::Node<LLVMIR::L_block*>* nd = bg.mynodes[succId];
+        newOut = TempSet_union(newOut, &InOutTable[nd].in);
+    }
+    // needMoreIter: 是否要继续下次迭代的变量。
+    // 真假取决于后继们是否发生变化和自身是否发生变化
+    bool needMoreIter = false;
+    // 自身的in out是否发生变化
+    needMoreIter = needMoreIter || !TempSet_eq(newIn, &in);
+    needMoreIter = needMoreIter || !TempSet_eq(newOut, &out);
+    // 不管怎么样都要更新自身
+    in = *newIn;
+    out = *newOut;
+    // 3 深搜后继遍历其它元素。
+    for (int succId : r->succs) {
+        GRAPH::Node<LLVMIR::L_block*>* nd = bg.mynodes[succId];
+        if (nd->color != dyeColor) {
+            // 后继们是否发生变化
+            needMoreIter = needMoreIter || LivenessIteration(nd, bg);
         }
     }
 
     return needMoreIter;
 }
 
-void Dominators(GRAPH::Graph<LLVMIR::L_block*>& bg) {
-    // 添加了DominatorIteration
-    // 添加了DomUnion DomIntersection
-    // 修改了Dominators ssa.cpp
-    // 最好添加clearColors graph.hpp
+void PrintTemps(FILE* out, TempSet set) {
+    for (auto x : *set) {
+        printf("%d  ", x->num);
+    }
+}
 
-    // 清除颜色
-    bg.clearColor();
+void Show_Liveness(FILE* out, GRAPH::Graph<LLVMIR::L_block*>& bg) {
+    fprintf(out, "\n\nNumber of iterations=%d\n\n", gi);
+    for (auto block_node : bg.mynodes) {
+        fprintf(out, "----------------------\n");
+        printf("block %s \n", block_node.second->info->label->name.c_str());
+        fprintf(out, "def=\n");
+        PrintTemps(out, &FG_def(block_node.second));
+        fprintf(out, "\n");
+        fprintf(out, "use=\n");
+        PrintTemps(out, &FG_use(block_node.second));
+        fprintf(out, "\n");
+        fprintf(out, "In=\n");
+        PrintTemps(out, &FG_In(block_node.second));
+        fprintf(out, "\n");
+        fprintf(out, "Out=\n");
+        PrintTemps(out, &FG_Out(block_node.second));
+        fprintf(out, "\n");
+    }
+}
+// 以block为单位
+void Liveness(GRAPH::Node<LLVMIR::L_block*>* r,
+              GRAPH::Graph<LLVMIR::L_block*>& bg,
+              std::vector<Temp_temp*>& args) {
+    init_INOUT();
+    Use_def(r, bg, args);
+    gi = 0;
     bool changed = true;
-    GRAPH::Node<LLVMIR::L_block*>* srcNode = bg.mynodes[0];
-    int iterTimes = 0;
     while (changed) {
-        changed = DominatorIteration(srcNode, bg, iterTimes);
-        iterTimes++;
+        changed = LivenessIteration(r, bg);
+        // 一次DFS LivenessIteration之后，迭代次数gi++
+        gi++;
     }
-    printf_domi();
-}
-
-void printf_domi() {
-    printf("Dominator:\n");
-    for (auto x : dominators) {
-        printf("%s :\n", x.first->label->name.c_str());
-        for (auto t : x.second) {
-            printf("%s ", t->label->name.c_str());
-        }
-        printf("\n\n");
-    }
-}
-
-void printf_D_tree() {
-    printf("dominator tree:\n");
-    for (auto x : tree_dominators) {
-        printf("%s :\n", x.first->label->name.c_str());
-        for (auto t : x.second.succs) {
-            printf("%s ", t->label->name.c_str());
-        }
-        printf("\n\n");
-    }
-}
-
-void printf_DF() {
-    printf("DF:\n");
-    for (auto x : DF_array) {
-        printf("%s :\n", x.first->label->name.c_str());
-        for (auto t : x.second) {
-            printf("%s ", t->label->name.c_str());
-        }
-        printf("\n\n");
-    }
-}
-
-void tree_Dominators(GRAPH::Graph<LLVMIR::L_block*>& bg) {
-    //   Todo
-}
-
-void computeDF(GRAPH::Graph<LLVMIR::L_block*>& bg,
-               GRAPH::Node<LLVMIR::L_block*>* r) {
-    //   Todo
-}
-
-// 只对标量做
-void Place_phi_fu(GRAPH::Graph<LLVMIR::L_block*>& bg, L_func* fun) {
-    //   Todo
-}
-
-static list<AS_operand**> get_def_int_operand(LLVMIR::L_stm* stm) {
-    list<AS_operand**> ret1 = get_def_operand(stm), ret2;
-    for (auto AS_op : ret1) {
-        if ((**AS_op).u.TEMP->type == TempType::INT_TEMP) {
-            ret2.push_back(AS_op);
-        }
-    }
-    return ret2;
-}
-
-static list<AS_operand**> get_use_int_operand(LLVMIR::L_stm* stm) {
-    list<AS_operand**> ret1 = get_use_operand(stm), ret2;
-    for (auto AS_op : ret1) {
-        if ((**AS_op).u.TEMP->type == TempType::INT_TEMP) {
-            ret2.push_back(AS_op);
-        }
-    }
-    return ret2;
-}
-
-static void Rename_temp(GRAPH::Graph<LLVMIR::L_block*>& bg,
-                        GRAPH::Node<LLVMIR::L_block*>* n,
-                        unordered_map<Temp_temp*, stack<Temp_temp*>>& Stack) {
-    //   Todo
-}
-
-void Rename(GRAPH::Graph<LLVMIR::L_block*>& bg) {
-    //   Todo
-}
-
-bool isScalar_Alloca(AS_operand* a) {
-    return a && a->kind == OperandKind::TEMP &&
-           a->u.TEMP->type == TempType::INT_PTR && a->u.TEMP->len == 0;
-}
-// mem2reg中名字覆盖(temp_temp改至一样)
-void cover(AS_operand* cur,
-           std::unordered_map<AS_operand*, AS_operand*>& nameCover) {
-    // 只翻译标量
-    if (!cur || cur->kind != OperandKind::TEMP ||
-        cur->u.TEMP->type != TempType::INT_TEMP) {
-        return;
-    }
-    if (nameCover.find(cur) == nameCover.end()) {
-        return;
-    }
-    // 递归查找到最深处的Asoprand
-    AS_operand* root = nameCover[cur];
-    if (root == nullptr) {
-        return;  // 本身就是根元素，无需覆盖,别人得跟他叫一个名
-    }
-    int level = 0;
-    while (nameCover[root] != nullptr) {
-        root = nameCover[root];
-    }
-    cur->u.TEMP = root->u.TEMP;
-}
-
-// Dom的并
-unordered_set<L_block*> dom_union(unordered_set<L_block*>& a,
-                                  unordered_set<L_block*>& b) {
-    unordered_set<L_block*> res;
-    for (auto block : a) {
-        res.emplace(block);
-    }
-    for (auto block : b) {
-        res.emplace(block);
-    }
-    return res;
-}
-// Dom的交
-unordered_set<L_block*> dom_intersection(unordered_set<L_block*>& a,
-                                         unordered_set<L_block*>& b) {
-    unordered_set<L_block*> res;
-    for (auto block : a) {
-        if (b.find(block) != b.end()) {
-            res.emplace(block);
-        }
-    }
-    return res;
+    // Show_Liveness(stdout, bg);
 }
