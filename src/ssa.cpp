@@ -239,34 +239,44 @@ void mem2reg(LLVMIR::L_func* fun) {
 
 bool DominatorIteration(GRAPH::Node<LLVMIR::L_block*>* r,
                         GRAPH::Graph<LLVMIR::L_block*>& bg,
-                        int iterTimes) {
+                        int iterTimes,
+                        std::unordered_set<LLVMIR::L_block*>& allBlock) {
     int dyeColor = 99999 + iterTimes;
     // 为自身染色
     r->color = dyeColor;
-
     // 创建新Dom
     unordered_set<L_block*> newDom;
     newDom.emplace(r->info);
     // 得到前驱的交集
     unordered_set<L_block*> predIntersection;
+    if (r->preds.size() != 0) {
+        predIntersection = allBlock;
+    }
+
     for (int predId : r->preds) {
         GRAPH::Node<LLVMIR::L_block*>* node = bg.mynodes[predId];
         predIntersection =
             dom_intersection(predIntersection, dominators[node->info]);
     }
     // 得到新Dom的完全体
+    printf("Pred size %ld\n", r->preds.size());
+    printf("Before Union newDom size %ld\n", newDom.size());
+    printf("Before Union predIntersection size %ld\n", predIntersection.size());
     newDom = dom_union(newDom, predIntersection);
+    printf("%s :newDom size %d\n", r->info->label->name.c_str(), newDom.size());
     // 判断自身是否发生变化
     bool needMoreIter = false;
     unordered_set<L_block*>& curDom = dominators[r->info];
     needMoreIter = needMoreIter || (curDom != newDom);  // set直接用==判断
-
+    // 替换老Dom
+    curDom = newDom;
+    printf("self Change %d\n", needMoreIter);
     // 深搜遍历其余节点
     for (int succId : r->succs) {
         GRAPH::Node<LLVMIR::L_block*>* node = bg.mynodes[succId];
         if (node->color != dyeColor) {
-            needMoreIter =
-                needMoreIter || DominatorIteration(node, bg, iterTimes);
+            needMoreIter = needMoreIter ||
+                           DominatorIteration(node, bg, iterTimes, allBlock);
         }
     }
 
@@ -301,8 +311,9 @@ void Dominators(GRAPH::Graph<LLVMIR::L_block*>& bg) {
     bool changed = true;
     int iterTimes = 0;
     while (changed) {
-        changed = DominatorIteration(srcNode, bg, iterTimes);
+        changed = DominatorIteration(srcNode, bg, iterTimes, allBlock);
         iterTimes++;
+        changed = false;
     }
     printf_domi();
 }
