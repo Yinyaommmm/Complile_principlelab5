@@ -291,8 +291,8 @@ static bool LivenessIteration(GRAPH::Node<LLVMIR::L_block*>* r,
     // 真假取决于后继们是否发生变化和自身是否发生变化
     bool needMoreIter = false;
     // 自身的in out是否发生变化
-    needMoreIter = needMoreIter || !TempSet_eq(newIn, &in);
-    needMoreIter = needMoreIter || !TempSet_eq(newOut, &out);
+    needMoreIter = !TempSet_eq(newIn, &in) || needMoreIter;
+    needMoreIter = !TempSet_eq(newOut, &out) || needMoreIter;
     // 不管怎么样都要更新自身
     in = *newIn;
     out = *newOut;
@@ -301,7 +301,7 @@ static bool LivenessIteration(GRAPH::Node<LLVMIR::L_block*>* r,
         GRAPH::Node<LLVMIR::L_block*>* nd = bg.mynodes[succId];
         if (nd->color != dyeColor) {
             // 后继们是否发生变化
-            needMoreIter = needMoreIter || LivenessIteration(nd, bg);
+            needMoreIter = LivenessIteration(nd, bg) || needMoreIter;
         }
     }
 

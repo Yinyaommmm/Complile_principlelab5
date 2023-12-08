@@ -25,13 +25,14 @@ unordered_map<L_block*, imm_Dominator> tree_dominators;
 unordered_map<L_block*, unordered_set<L_block*>> DF_array;
 unordered_map<L_block*, Node<LLVMIR::L_block*>*> revers_graph;
 unordered_map<Temp_temp*, AS_operand*> temp2ASoper;
-
+std::vector<Temp_temp*> args;
 static void init_table() {
     dominators.clear();
     tree_dominators.clear();
     DF_array.clear();
     revers_graph.clear();
     temp2ASoper.clear();
+    args.clear();
 }
 
 LLVMIR::L_prog* SSA(LLVMIR::L_prog* prog) {
@@ -39,6 +40,7 @@ LLVMIR::L_prog* SSA(LLVMIR::L_prog* prog) {
     for (auto& fun : prog->funcs) {
         printf("-------------ssa : block %d-------------\n", i++);
         init_table();
+        args = fun->args;
         // AS_operand* 指向同一块 AS_operand 实例
         combine_addr(fun);
         mem2reg(fun);
@@ -47,15 +49,15 @@ LLVMIR::L_prog* SSA(LLVMIR::L_prog* prog) {
         // Show_graph(stdout,RA_bg);
         Liveness(RA_bg.mynodes[0], RA_bg, fun->args);
         Dominators(RA_bg);
-        printf_domi();
-        // tree_Dominators(RA_bg);
-        // // printf_D_tree();
+        // printf_domi();
+        tree_Dominators(RA_bg);
+        // printf_D_tree();
         // // 默认0是入口block
-        // computeDF(RA_bg, RA_bg.mynodes[0]);
-        // // printf_DF();
-        // Place_phi_fu(RA_bg, fun);
-        // Rename(RA_bg);
-        // combine_addr(fun);
+        computeDF(RA_bg, RA_bg.mynodes[0]);
+        // printf_DF();
+        Place_phi_fu(RA_bg, fun);
+        Rename(RA_bg);
+        combine_addr(fun);
     }
     return prog;
 }
@@ -152,13 +154,26 @@ void mem2reg(LLVMIR::L_func* fun) {
                     // 移到下一条指令
                     it++;
                 } else if (src->kind == OperandKind::TEMP) {
-                    nameCover[src] = ptr;
-                    // 自动移动到下一条指令
-                    it = instrs.erase(it);
-                    // 添加move,
-                    it = instrs.insert(it, L_Move(src, ptr));
-                    // 移到下一条指令
-                    it++;
+                    bool isFuncArg = false;
+                    for (auto temp : fun->args){
+                        if (temp == src->u.TEMP){
+                            isFuncArg = true;
+                        }
+                    }
+                    if (isFuncArg){
+                        // 函数参数，需要move,但不需要cover
+                        // 自动移动到下一条指令
+                        it = instrs.erase(it);
+                        // 添加move,
+                        it = instrs.insert(it, L_Move(src, ptr));
+                        // 移到下一条指令
+                        it++;
+                    }else {
+                        // 是中间参数，不需要move
+                        nameCover[src] = ptr;
+                        // 自动移动到下一条指令
+                         it = instrs.erase(it);
+                    }
                 } else {
                     // 不可能是全局变量store进来
                     assert(0);
@@ -259,27 +274,22 @@ bool DominatorIteration(GRAPH::Node<LLVMIR::L_block*>* r,
             dom_intersection(predIntersection, dominators[node->info]);
     }
     // 得到新Dom的完全体
-    printf("Pred size %ld\n", r->preds.size());
-    printf("Before Union newDom size %ld\n", newDom.size());
-    printf("Before Union predIntersection size %ld\n", predIntersection.size());
+
     newDom = dom_union(newDom, predIntersection);
-    printf("%s :newDom size %d\n", r->info->label->name.c_str(), newDom.size());
     // 判断自身是否发生变化
     bool needMoreIter = false;
     unordered_set<L_block*>& curDom = dominators[r->info];
     needMoreIter = needMoreIter || (curDom != newDom);  // set直接用==判断
     // 替换老Dom
     curDom = newDom;
-    printf("self Change %d\n", needMoreIter);
     // 深搜遍历其余节点
     for (int succId : r->succs) {
         GRAPH::Node<LLVMIR::L_block*>* node = bg.mynodes[succId];
         if (node->color != dyeColor) {
-            needMoreIter = needMoreIter ||
-                           DominatorIteration(node, bg, iterTimes, allBlock);
+            needMoreIter = DominatorIteration(node, bg, iterTimes, allBlock) ||
+                           needMoreIter;
         }
     }
-
     return needMoreIter;
 }
 
@@ -313,9 +323,7 @@ void Dominators(GRAPH::Graph<LLVMIR::L_block*>& bg) {
     while (changed) {
         changed = DominatorIteration(srcNode, bg, iterTimes, allBlock);
         iterTimes++;
-        changed = false;
     }
-    printf_domi();
 }
 
 void printf_domi() {
@@ -352,17 +360,166 @@ void printf_DF() {
 }
 
 void tree_Dominators(GRAPH::Graph<LLVMIR::L_block*>& bg) {
-    //   Todo
+    // 生成支配树 BFS
+    std::deque<int> q;
+    q.push_back(0);
+    std::set<int> flag;
+    flag.insert(0);
+    while (q.size() > 0) {
+        GRAPH::Node<LLVMIR::L_block*>* node = bg.mynodes[q.front()];
+        q.pop_front();
+        LLVMIR::L_block* block = node->info;
+        std::unordered_map<L_block*, unordered_set<L_block*>>::const_iterator
+            iter = dominators.find(block);
+        LLVMIR::L_block* only_idom = nullptr;
+        int cnt = 0;
+        for (LLVMIR::L_block* dom_block : iter->second) {
+            if (dom_block == block)
+                continue;  // 忽略掉自己
+            bool isNotOthersDom = true;
+            // 判断该Domer属不属于其它Domer的domee
+            for (LLVMIR::L_block* _temp : iter->second) {
+                if (_temp == dom_block)
+                    continue;  // 忽略掉 dom_block 自己
+                if (_temp == block)
+                    continue;  // 忽略掉 block 自己
+                std::unordered_map<L_block*,
+                                   unordered_set<L_block*>>::const_iterator
+                    _temp_iter = dominators.find(_temp);
+                if (_temp_iter->second.count(dom_block)) {
+                    // 如果出现在别的 支配节点的 支配set中
+                    // 那么就是其它的支配节点的支配节点
+                    isNotOthersDom = false;
+                }
+            }
+            if (isNotOthersDom) {
+                only_idom = dom_block;
+                cnt++;
+            } else {
+                // 无事发生
+            }
+        }
+        if (cnt > 1)
+            assert(0);  // 看看是不是唯一的
+        imm_Dominator id = imm_Dominator();
+        id.pred = only_idom;
+        id.succs = std::unordered_set<LLVMIR::L_block*>();
+        if (only_idom) {
+            // 如果存在 idom 那么要更新 idom 的 succs
+            std::unordered_map<L_block*, imm_Dominator>::iterator iter =
+                tree_dominators.find(only_idom);
+            if (iter == tree_dominators.end())
+                assert(0);
+            iter->second.succs.insert(block);
+        }
+        tree_dominators.emplace(block, id);
+
+        std::set<int> succs = node->succs;
+        for (int succ : succs) {
+            if (!flag.count(succ)) {
+                // 未加入过的才能加入 BFS
+                q.push_back(succ);
+                flag.insert(succ);
+            }
+        }
+    }
 }
 
 void computeDF(GRAPH::Graph<LLVMIR::L_block*>& bg,
                GRAPH::Node<LLVMIR::L_block*>* r) {
-    //   Todo
+    // 创建reverse graph
+    for (auto it = bg.mynodes.begin(); it != bg.mynodes.end(); it++) {
+        revers_graph[it->second->info] = it->second;
+    }
+
+    // 伪代码的抄写
+    std::unordered_set<L_block*> s;
+    std::set<int> succs = r->succs;
+    for (int succ : succs) {
+        L_block* block_succ = bg.mynodes[succ]->info;
+        if (tree_dominators[block_succ].pred != r->info) {
+            s.insert(block_succ);
+        }
+    }
+    for (L_block* block_child : tree_dominators[r->info].succs) {
+        GRAPH::Node<LLVMIR::L_block*>* next = revers_graph[block_child];
+        computeDF(bg, next);
+        for (L_block* block_df_child : DF_array.find(block_child)->second) {
+            // n 不是 w 的必经点 或者 n == w
+            if (block_df_child == r->info ||
+                !dominators.find(block_df_child)->second.count(r->info)) {
+                s.insert(block_df_child);
+            }
+        }
+    }
+    DF_array.emplace(r->info, s);
 }
 
 // 只对标量做
 void Place_phi_fu(GRAPH::Graph<LLVMIR::L_block*>& bg, L_func* fun) {
-    //   Todo
+
+    // 只能转译伪代码
+    std::unordered_map<Temp_temp*, std::unordered_set<GRAPH::Node<LLVMIR::L_block*>*>> defsites;
+    // 记录以访问过的temp_temp
+    std::set<Temp_temp*> temp_Visted; 
+    std::deque<int> q;
+    q.push_back(0);
+    std::set<int> flag;
+    flag.insert(0);
+    while (q.size() > 0){
+        GRAPH::Node<LLVMIR::L_block*>* node = bg.mynodes[q.front()];
+        q.pop_front();
+        std::unordered_set<Temp_temp*> def = FG_def(node);
+        for (Temp_temp* tt: def){
+            defsites.emplace(tt, std::unordered_set<GRAPH::Node<LLVMIR::L_block*>*>());
+            temp_Visted.insert(tt);
+            defsites.find(tt)->second.insert(node);
+        }
+        std::set<int> succs = node->succs;
+        for (int succ: succs){
+            if (!flag.count(succ)){
+                // 未加入过的才能加入 BFS
+                q.push_back(succ);
+                flag.insert(succ);
+            }
+        }
+    }
+
+    std::unordered_map<LLVMIR::L_block*, std::unordered_set<Temp_temp*>> phi;
+    for (Temp_temp* tt: temp_Visted){
+        std::unordered_set<GRAPH::Node<LLVMIR::L_block*>*> W = defsites.find(tt)->second;
+        while (W.size() > 0){
+            std::unordered_set<GRAPH::Node<LLVMIR::L_block*>*>::iterator iter = W.begin();
+            GRAPH::Node<LLVMIR::L_block*>* node = *iter;
+            for (L_block* Y: DF_array.find(node->info)->second){
+                phi.emplace(Y, std::unordered_set<Temp_temp*>());
+                GRAPH::Node<LLVMIR::L_block*>* Y_node = revers_graph[Y];
+                std::unordered_map<LLVMIR::L_block*, std::unordered_set<Temp_temp*>>::iterator phi_iter = phi.find(Y);
+                if (!phi_iter->second.count(tt)){
+                    AS_operand* aso = AS_Operand_Temp(tt);
+                    std::vector<std::pair<AS_operand*,Temp_label*>> phis;
+                    for (int Y_pred: Y_node->preds){
+                        GRAPH::Node<LLVMIR::L_block*>* Y_pred_node = bg.mynodes[Y_pred];
+                        Temp_label* label = Y_pred_node->info->label;
+                        if (FG_In(Y_node).count(tt)){
+                            // 只对在该节点live in的变量进行插phi
+                            phis.push_back(std::pair<AS_operand*,Temp_label*>(aso, label));
+                        }
+                    }
+                    if (phis.size() > 0){
+                        std::list<L_stm*>::iterator Y_iter = Y->instrs.begin();
+                        Y_iter ++;
+                        Y->instrs.insert(Y_iter, LLVMIR::L_Phi(aso, phis));
+                    }
+                    phi_iter->second.insert(tt);
+                    if (!FG_def(Y_node).count(tt)){
+                        W.insert(Y_node);
+                    }
+                }
+            }
+            W.erase(iter);
+        }
+    }
 }
 
 static list<AS_operand**> get_def_int_operand(LLVMIR::L_stm* stm) {
@@ -385,14 +542,243 @@ static list<AS_operand**> get_use_int_operand(LLVMIR::L_stm* stm) {
     return ret2;
 }
 
-static void Rename_temp(GRAPH::Graph<LLVMIR::L_block*>& bg,
-                        GRAPH::Node<LLVMIR::L_block*>* n,
-                        unordered_map<Temp_temp*, stack<Temp_temp*>>& Stack) {
-    //   Todo
+AS_operand* Rename_temp_def(std::unordered_map<Temp_temp*, int>& count, std::unordered_map<Temp_temp*, std::stack<Temp_temp*>>& stack, AS_operand* aso, std::vector<Temp_temp*>& Rename_def){
+    if (aso == nullptr) return aso;
+    if (aso->kind != OperandKind::TEMP){
+        return aso;
+    }
+    Temp_temp* tt = aso->u.TEMP;
+    // 初始化
+    count.emplace(tt, 0);
+    stack.emplace(tt, std::stack<Temp_temp*>());
+
+    if (tt->type != TempType::INT_TEMP){
+        count.find(tt)->second ++;
+        stack.find(tt)->second.push(tt);
+        return AS_Operand_Temp(tt);
+    }
+
+    // 只处理标量
+    Temp_temp *new_tt = Temp_newtemp_int();
+    count.find(tt)->second ++;
+    stack.find(tt)->second.push(new_tt);
+    Rename_def.push_back(tt);
+
+    AS_operand* new_aso = AS_Operand_Temp(new_tt);
+    return new_aso;
+}
+
+AS_operand* Rename_temp_use(std::unordered_map<Temp_temp*, int>& count, std::unordered_map<Temp_temp*, std::stack<Temp_temp*>>& stack, AS_operand* aso){
+    if (aso == nullptr) return aso;
+    if (aso->kind != OperandKind::TEMP){
+        return aso;
+    }
+    Temp_temp* tt = aso->u.TEMP;
+    if (count.find(tt) == count.end()){
+        // 如果不是函数
+        bool isArg = false;
+        for (Temp_temp* arg: args){
+            if (arg == tt){
+                isArg = true;
+                break;
+            }
+        }
+        // use 在 def 之前 而且也不是参数
+        if (isArg) return aso;
+        assert(0);
+    }
+    
+    return AS_Operand_Temp(stack.find(tt)->second.top());
+}
+
+void Rename(std::unordered_map<Temp_temp*, int>& count, std::unordered_map<Temp_temp*, std::stack<Temp_temp*>>& stack, GRAPH::Graph<LLVMIR::L_block*>& bg, GRAPH::Node<LLVMIR::L_block*>*& node){
+    // Rename 本质是一个 DFS
+    std::list<L_stm*>::iterator iter = node->info->instrs.begin();
+    // 记录 def 之后要弹出的
+    std::vector<Temp_temp*> Rename_def;
+    while (iter!=node->info->instrs.end()){
+        L_stm* S = *iter;
+        switch (S->type)
+        {
+        case L_StmKind::T_ALLOCA:{
+            AS_operand *new_aso = Rename_temp_def(count, stack, S->u.ALLOCA->dst, Rename_def);
+            node->info->instrs.insert(iter, LLVMIR::L_Alloca(new_aso));
+            iter = node->info->instrs.erase(iter);
+            continue;
+        }
+            break;
+        
+        case L_StmKind::T_BINOP:{
+            AS_operand *aso_left = S->u.BINOP->dst, *aso_right_1 = S->u.BINOP->left, *aso_right_2 = S->u.BINOP->right;
+            AS_operand *new_aso_right_1 = Rename_temp_use(count, stack, aso_right_1);
+            AS_operand *new_aso_right_2 = Rename_temp_use(count, stack, aso_right_2);
+            AS_operand *new_aso_left = Rename_temp_def(count, stack, aso_left, Rename_def);
+            node->info->instrs.insert(iter, LLVMIR::L_Binop(S->u.BINOP->op, new_aso_right_1, new_aso_right_2, new_aso_left));
+            iter = node->info->instrs.erase(iter);
+            continue;
+        }
+            break;
+
+        case L_StmKind::T_CALL:{
+            AS_operand *aso_left = S->u.CALL->res;
+            std::vector<AS_operand*> args = S->u.CALL->args;
+            std::vector<AS_operand*> new_args;
+            for (AS_operand* arg: args){
+                new_args.push_back(Rename_temp_use(count, stack, arg));
+            }
+            AS_operand *new_aso_left = Rename_temp_def(count, stack, aso_left, Rename_def);
+            
+            node->info->instrs.insert(iter, LLVMIR::L_Call(S->u.CALL->fun, new_aso_left, new_args));
+            iter = node->info->instrs.erase(iter);
+            continue;
+        }
+            break;
+
+        case L_StmKind::T_CJUMP:{
+            AS_operand *aso = S->u.CJUMP->dst;
+            AS_operand *new_aso = Rename_temp_use(count, stack, aso);
+            node->info->instrs.insert(iter, LLVMIR::L_Cjump(new_aso, S->u.CJUMP->true_label, S->u.CJUMP->false_label));
+            iter = node->info->instrs.erase(iter);
+            continue;
+        }
+            break;
+
+        
+        case L_StmKind::T_CMP:{
+            AS_operand *aso_left = S->u.CMP->dst, *aso_right_1 = S->u.CMP->left, *aso_right_2 = S->u.CMP->right;
+            AS_operand *new_aso_right_1 = Rename_temp_use(count, stack, aso_right_1);
+            AS_operand *new_aso_right_2 = Rename_temp_use(count, stack, aso_right_2);
+            AS_operand *new_aso_left = Rename_temp_def(count, stack, aso_left, Rename_def);
+            node->info->instrs.insert(iter, LLVMIR::L_Cmp(S->u.CMP->op, new_aso_right_1, new_aso_right_2, new_aso_left));
+            iter = node->info->instrs.erase(iter);
+            continue;
+        }
+            break;
+
+        case L_StmKind::T_GEP:{
+            AS_operand* base_aso = Rename_temp_use(count, stack, S->u.GEP->base_ptr);
+            AS_operand* index_aso = Rename_temp_use(count, stack, S->u.GEP->index);
+            AS_operand* ptr_aso = Rename_temp_def(count, stack, S->u.GEP->new_ptr, Rename_def);
+            node->info->instrs.insert(iter, LLVMIR::L_Gep(ptr_aso, base_aso, index_aso));
+            iter = node->info->instrs.erase(iter);
+            continue;
+        }
+            break;
+
+        case L_StmKind::T_JUMP:{
+            iter ++;
+            continue;
+        }
+            break;
+
+        case L_StmKind::T_LABEL:{
+            iter ++;
+            continue;
+        }
+            break;
+
+        case L_StmKind::T_LOAD:{
+            AS_operand *ptr = Rename_temp_use(count, stack, S->u.LOAD->ptr);
+            AS_operand *dst = Rename_temp_def(count, stack, S->u.LOAD->dst, Rename_def);
+            node->info->instrs.insert(iter, LLVMIR::L_Load(dst, ptr));
+            iter = node->info->instrs.erase(iter);
+            continue;
+        }
+            break;
+
+        case L_StmKind::T_MOVE:{
+            AS_operand *src = Rename_temp_use(count, stack, S->u.MOVE->src);
+            AS_operand *dst = Rename_temp_def(count, stack, S->u.MOVE->dst, Rename_def);
+            node->info->instrs.insert(iter, LLVMIR::L_Move(src, dst));
+            iter = node->info->instrs.erase(iter);
+            continue;
+        }
+
+        case L_StmKind::T_NULL:{
+            iter ++;
+            continue;
+        }
+            break;
+
+        case L_StmKind::T_PHI:{
+            // 这里暂时不处理 phi 语句 ? Phi 的 def 也要加入进来！ use 不用
+            AS_operand *dst = Rename_temp_def(count, stack, S->u.PHI->dst, Rename_def);
+            node->info->instrs.insert(iter, LLVMIR::L_Phi(dst, S->u.PHI->phis));
+            iter = node->info->instrs.erase(iter);
+            continue;
+        }
+            break;
+
+        case L_StmKind::T_RETURN:{
+            AS_operand *ret = Rename_temp_use(count, stack, S->u.RET->ret);
+            node->info->instrs.insert(iter, LLVMIR::L_Ret(ret));
+            iter = node->info->instrs.erase(iter);
+            continue;
+        }
+            break;
+
+        case L_StmKind::T_STORE:{
+            AS_operand *src = Rename_temp_use(count, stack, S->u.STORE->src);
+            AS_operand *ptr = Rename_temp_def(count, stack, S->u.STORE->ptr, Rename_def);
+            node->info->instrs.insert(iter, LLVMIR::L_Store(src, ptr));
+            iter = node->info->instrs.erase(iter);
+            continue;
+        }
+            break;
+
+        case L_StmKind::T_VOID_CALL:{
+            std::vector<AS_operand*> args = S->u.VOID_CALL->args;
+            std::vector<AS_operand*> new_args;
+            for (AS_operand* arg: args){
+                new_args.push_back(Rename_temp_use(count, stack, arg));
+            }
+            node->info->instrs.insert(iter, LLVMIR::L_Voidcall(S->u.CALL->fun, new_args));
+            iter = node->info->instrs.erase(iter);
+            continue;
+        }
+            break;
+
+        default:
+            break;
+        }
+    }
+
+    std::set<int> succs = node->succs;
+    for (int succ: succs){
+        GRAPH::Node<LLVMIR::L_block*>* node_succ = bg.mynodes[succ];
+        for (L_stm* stm: node_succ->info->instrs){
+            if (stm->type == L_StmKind::T_PHI){
+                for (int i=0;i<stm->u.PHI->phis.size();i++){
+                    if (stm->u.PHI->phis[i].second == node->info->label){
+                        AS_operand *temp = Rename_temp_use(count, stack, stm->u.PHI->phis[i].first);
+                        stm->u.PHI->phis[i].first = temp;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // FIXME: 你他妈的 遍历的是支配树？
+    node->color = -1;
+    imm_Dominator id = tree_dominators.find(node->info)->second;
+    for (L_block* succ: id.succs){
+        if (revers_graph[succ]->color == -1) assert(0);
+        Rename(count, stack, bg, revers_graph[succ]);
+    }
+
+    // 弹出之前压入栈的一切
+    for (Temp_temp* tt: Rename_def){
+        count.find(tt)->second --;
+        stack.find(tt)->second.pop();
+    }
 }
 
 void Rename(GRAPH::Graph<LLVMIR::L_block*>& bg) {
-    //   Todo
+    // redefinition phi 所有的重命名都在这里
+    std::unordered_map<Temp_temp*, int> count;
+    std::unordered_map<Temp_temp*, std::stack<Temp_temp*>> stack;
+    Rename(count, stack, bg, bg.mynodes[0]);
 }
 
 bool isScalar_Alloca(AS_operand* a) {
