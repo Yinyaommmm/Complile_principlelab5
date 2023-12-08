@@ -37,7 +37,7 @@ static void init_table() {
 LLVMIR::L_prog* SSA(LLVMIR::L_prog* prog) {
     int i = 0;
     for (auto& fun : prog->funcs) {
-        printf("ssa : block %d\n", i++);
+        printf("-------------ssa : block %d-------------\n", i++);
         init_table();
         // AS_operand* 指向同一块 AS_operand 实例
         combine_addr(fun);
@@ -46,8 +46,8 @@ LLVMIR::L_prog* SSA(LLVMIR::L_prog* prog) {
         SingleSourceGraph(RA_bg.mynodes[0], RA_bg, fun);
         // Show_graph(stdout,RA_bg);
         Liveness(RA_bg.mynodes[0], RA_bg, fun->args);
-        // Dominators(RA_bg);
-        // // printf_domi();
+        Dominators(RA_bg);
+        printf_domi();
         // tree_Dominators(RA_bg);
         // // printf_D_tree();
         // // 默认0是入口block
@@ -114,16 +114,19 @@ void mem2reg(LLVMIR::L_func* fun) {
         for (auto it = instrs.begin(); it != instrs.end();) {
             L_stm* stm = *it;
             if (stm->type == L_StmKind::T_ALLOCA) {
-                printf("Alloca 1\n");
                 // 直接删除,it指向下一个
                 if (is_mem_variable(stm)) {
+                    AS_operand* dst = stm->u.ALLOCA->dst;
+                    AS_operand* int0 = AS_Operand_Const(0);
                     nameCover[stm->u.ALLOCA->dst] = nullptr;
                     it = instrs.erase(it);
+                    it = instrs.insert(it, L_Move(int0, dst));
+                    // 移到下一条指令
+                    it++;
                 } else {
                     it++;
                 }
             } else if (stm->type == L_StmKind::T_LOAD) {
-                printf("Load 2\n");
                 // dst = load from ptr
                 AS_operand *dst = stm->u.LOAD->dst, *ptr = stm->u.LOAD->ptr;
                 // 如果ptr是个标量，需要删除。
@@ -134,7 +137,6 @@ void mem2reg(LLVMIR::L_func* fun) {
                     it++;
                 }
             } else if (stm->type == L_StmKind::T_STORE) {
-                printf("STORE 3\n");
                 // store i32 %src, i32* %ptr
                 L_store* store = stm->u.STORE;
                 AS_operand *src = store->src, *ptr = store->ptr;
@@ -153,12 +155,15 @@ void mem2reg(LLVMIR::L_func* fun) {
                     nameCover[src] = ptr;
                     // 自动移动到下一条指令
                     it = instrs.erase(it);
+                    // 添加move,
+                    it = instrs.insert(it, L_Move(src, ptr));
+                    // 移到下一条指令
+                    it++;
                 } else {
                     // 不可能是全局变量store进来
                     assert(0);
                 }
             } else {
-                printf("eLSE 4\n");
                 it++;
             }
         }
@@ -232,8 +237,58 @@ void mem2reg(LLVMIR::L_func* fun) {
     }
 }
 
+bool DominatorIteration(GRAPH::Node<LLVMIR::L_block*>* r,
+                        GRAPH::Graph<LLVMIR::L_block*>& bg,
+                        int iterTimes) {
+    int dyeColor = 99999 + iterTimes;
+    // 为自身染色
+    r->color = dyeColor;
+
+    // 创建新Dom
+    unordered_set<L_block*> newDom;
+    newDom.emplace(r->info);
+    // 得到前驱的交集
+    unordered_set<L_block*> predUnion;
+    for (int predId : r->preds) {
+        GRAPH::Node<LLVMIR::L_block*>* node = bg.mynodes[predId];
+        predUnion = dom_intersection(predUnion, dominators[node->info]);
+    }
+    // 得到新Dom的完全体
+    newDom = dom_union(newDom, predUnion);
+    // 判断自身是否发生变化
+    bool needMoreIter = false;
+    unordered_set<L_block*>& curDom = dominators[r->info];
+    // needMoreIter = needMoreIter || !dom_eq(curDom, newDom);
+    needMoreIter = needMoreIter || (curDom != newDom);  // set直接用==判断
+
+    // 深搜遍历其余节点
+    for (int succId : r->succs) {
+        GRAPH::Node<LLVMIR::L_block*>* node = bg.mynodes[succId];
+        if (node->color != dyeColor) {
+            needMoreIter =
+                needMoreIter || DominatorIteration(node, bg, iterTimes);
+        }
+    }
+
+    return needMoreIter;
+}
+
 void Dominators(GRAPH::Graph<LLVMIR::L_block*>& bg) {
-    //  Todo
+    // 添加了DominatorIteration
+    // 添加了DomUnion DomIntersection
+    // 修改了Dominators ssa.cpp
+    // 最好添加clearColors graph.hpp
+
+    // 清除颜色
+    bg.clearColor();
+    bool changed = true;
+    GRAPH::Node<LLVMIR::L_block*>* srcNode = bg.mynodes[0];
+    int iterTimes = 0;
+    while (changed) {
+        changed = DominatorIteration(srcNode, bg, iterTimes);
+        iterTimes++;
+    }
+    printf_domi();
 }
 
 void printf_domi() {
@@ -257,6 +312,7 @@ void printf_D_tree() {
         printf("\n\n");
     }
 }
+
 void printf_DF() {
     printf("DF:\n");
     for (auto x : DF_array) {
@@ -335,7 +391,30 @@ void cover(AS_operand* cur,
     int level = 0;
     while (nameCover[root] != nullptr) {
         root = nameCover[root];
-        printf("cover level: %d\n", level++);
     }
     cur->u.TEMP = root->u.TEMP;
+}
+
+// Dom的并
+unordered_set<L_block*> dom_union(unordered_set<L_block*>& a,
+                                  unordered_set<L_block*>& b) {
+    unordered_set<L_block*> res;
+    for (auto block : a) {
+        res.emplace(block);
+    }
+    for (auto block : b) {
+        res.emplace(block);
+    }
+    return res;
+}
+// Dom的交
+unordered_set<L_block*> dom_intersection(unordered_set<L_block*>& a,
+                                         unordered_set<L_block*>& b) {
+    unordered_set<L_block*> res;
+    for (auto block : a) {
+        if (b.find(block) != b.end()) {
+            res.emplace(block);
+        }
+    }
+    return res;
 }

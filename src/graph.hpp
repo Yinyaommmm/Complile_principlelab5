@@ -65,6 +65,9 @@ class Graph {
 
     /* Tell if there is an edge from "from" to "to" */
     bool goesTo(Node<T>* from, Node<T>* n);
+
+    //  clear vertices color
+    void clearColor();
 };
 
 template <typename T>
@@ -114,8 +117,8 @@ Node<T>* Graph<T>::addNode(T info) {
 
 template <typename T>
 void Graph<T>::rmNode(Node<T>* node) {
-    assert(node->outDegree == 0);
-    assert(node->inDegree == 0);
+    assert(node->outDegree() == 0);
+    assert(node->inDegree() == 0);
     node->mygraph->mynodes.erase(node->mykey);
 }
 
@@ -143,4 +146,12 @@ template <typename T>
 bool Graph<T>::goesTo(Node<T>* from, Node<T>* n) {
     return from->succs.count(n->mykey);
 }
+template <typename T>
+void Graph<T>::clearColor() {
+    for (auto it = this->mynodes.begin(); it != this->mynodes.end(); it++) {
+        Node<T>* node = it->second;
+        node->color = 0;
+    }
+}
+
 }  // namespace GRAPH

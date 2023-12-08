@@ -282,15 +282,21 @@ static bool LivenessIteration(GRAPH::Node<LLVMIR::L_block*>* r,
     TempSet newIn = TempSet_union(&use, outdefDiff);
     // 2.2 新out
     TempSet newOut = new TempSet_;
+
     for (int succId : r->succs) {
         GRAPH::Node<LLVMIR::L_block*>* nd = bg.mynodes[succId];
         newOut = TempSet_union(newOut, &InOutTable[nd].in);
     }
-    // 3 深搜后继
-    // neeMoreIter: 是否要继续下次迭代的变量。
+    // needMoreIter: 是否要继续下次迭代的变量。
     // 真假取决于后继们是否发生变化和自身是否发生变化
     bool needMoreIter = false;
-    // 遍历其它元素。
+    // 自身的in out是否发生变化
+    needMoreIter = needMoreIter || !TempSet_eq(newIn, &in);
+    needMoreIter = needMoreIter || !TempSet_eq(newOut, &out);
+    // 不管怎么样都要更新自身
+    in = *newIn;
+    out = *newOut;
+    // 3 深搜后继遍历其它元素。
     for (int succId : r->succs) {
         GRAPH::Node<LLVMIR::L_block*>* nd = bg.mynodes[succId];
         if (nd->color != dyeColor) {
@@ -298,12 +304,7 @@ static bool LivenessIteration(GRAPH::Node<LLVMIR::L_block*>* r,
             needMoreIter = needMoreIter || LivenessIteration(nd, bg);
         }
     }
-    // 自身的in out是否发生变化
-    needMoreIter = needMoreIter || TempSet_eq(newIn, &in);
-    needMoreIter = needMoreIter || TempSet_eq(newOut, &out);
-    // 不管怎么样都要更新自身
-    in = *newIn;
-    out = *newOut;
+
     return needMoreIter;
 }
 
@@ -345,4 +346,5 @@ void Liveness(GRAPH::Node<LLVMIR::L_block*>* r,
         // 一次DFS LivenessIteration之后，迭代次数gi++
         gi++;
     }
+    Show_Liveness(stdout, bg);
 }
