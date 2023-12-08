@@ -25,7 +25,7 @@ void printf_DF();
 
 // My Function
 // 判断是否是标量
-bool isScalar(AS_operand* a);
+bool isScalar_Alloca(AS_operand* a);
 // mem2reg中名字覆盖(temp_temp改至一样)
 void cover(AS_operand* cur,
            std::unordered_map<AS_operand*, AS_operand*>& nameCover);

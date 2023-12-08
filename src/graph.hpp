@@ -138,6 +138,7 @@ void Graph<T>::rmEdge(Node<T>* from, Node<T>* to) {
     from->succs.erase(from->succs.find(to->mykey));
 }
 
+// hasEdge(from, n )
 template <typename T>
 bool Graph<T>::goesTo(Node<T>* from, Node<T>* n) {
     return from->succs.count(n->mykey);

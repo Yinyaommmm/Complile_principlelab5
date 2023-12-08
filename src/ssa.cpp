@@ -42,10 +42,10 @@ LLVMIR::L_prog* SSA(LLVMIR::L_prog* prog) {
         // AS_operand* 指向同一块 AS_operand 实例
         combine_addr(fun);
         mem2reg(fun);
-        // auto RA_bg = Create_bg(fun->blocks);
-        // SingleSourceGraph(RA_bg.mynodes[0], RA_bg,fun);
-        // // Show_graph(stdout,RA_bg);
-        // Liveness(RA_bg.mynodes[0], RA_bg, fun->args);
+        auto RA_bg = Create_bg(fun->blocks);
+        SingleSourceGraph(RA_bg.mynodes[0], RA_bg, fun);
+        // Show_graph(stdout,RA_bg);
+        Liveness(RA_bg.mynodes[0], RA_bg, fun->args);
         // Dominators(RA_bg);
         // // printf_domi();
         // tree_Dominators(RA_bg);
@@ -127,7 +127,7 @@ void mem2reg(LLVMIR::L_func* fun) {
                 // dst = load from ptr
                 AS_operand *dst = stm->u.LOAD->dst, *ptr = stm->u.LOAD->ptr;
                 // 如果ptr是个标量，需要删除。
-                if (isScalar(ptr)) {
+                if (isScalar_Alloca(ptr)) {
                     nameCover[dst] = ptr;
                     it = instrs.erase(it);
                 } else {
@@ -138,7 +138,7 @@ void mem2reg(LLVMIR::L_func* fun) {
                 // store i32 %src, i32* %ptr
                 L_store* store = stm->u.STORE;
                 AS_operand *src = store->src, *ptr = store->ptr;
-                if (!isScalar(ptr)) {
+                if (!isScalar_Alloca(ptr)) {
                     it++;
                     continue;
                 }
@@ -312,14 +312,16 @@ void Rename(GRAPH::Graph<LLVMIR::L_block*>& bg) {
     //   Todo
 }
 
-bool isScalar(AS_operand* a) {
+bool isScalar_Alloca(AS_operand* a) {
     return a && a->kind == OperandKind::TEMP &&
            a->u.TEMP->type == TempType::INT_PTR && a->u.TEMP->len == 0;
 }
 // mem2reg中名字覆盖(temp_temp改至一样)
 void cover(AS_operand* cur,
            std::unordered_map<AS_operand*, AS_operand*>& nameCover) {
-    if (!isScalar(cur)) {
+    // 只翻译标量
+    if (!cur || cur->kind != OperandKind::TEMP ||
+        cur->u.TEMP->type != TempType::INT_TEMP) {
         return;
     }
     if (nameCover.find(cur) == nameCover.end()) {

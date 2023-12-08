@@ -31,12 +31,14 @@ Node<L_block*>* Look_bg(L_block* b) {
             break;
         }
     }
+    // 如果没有找到Node，就创建Node,找到了就返回创建的Node
     if (n1 == nullptr)
         return RA_bg.addNode(b);
     else
         return n1;
 }
 
+// 创建Node和Node之间的边
 static void Enter_bg(L_block* b1, L_block* b2) {
     Node<L_block*>* n1 = Look_bg(b1);
     Node<L_block*>* n2 = Look_bg(b2);
@@ -67,26 +69,42 @@ Graph<L_block*>& Create_bg(list<L_block*>& bl) {
 
 // maybe useful
 static void DFS(Node<L_block*>* r, Graph<L_block*>& bg) {
-
+    int dyeColor = 99;
+    r->color = dyeColor;
+    for (int nodeId : r->succs) {
+        if (bg.mynodes[nodeId]->color != dyeColor) {
+            DFS(bg.mynodes[nodeId], bg);
+        }
+    }
 }
 
-void SingleSourceGraph(Node<L_block*>* r, Graph<L_block*>& bg,L_func*fun) {
+void SingleSourceGraph(Node<L_block*>* r, Graph<L_block*>& bg, L_func* fun) {
     //   Todo
+    // 找到源头
+    Node<L_block*>* src = bg.mynodes[0];
+    // 深搜染色,颜色为99
+    DFS(src, bg);
+    // 删除没有染色的节点
+    for (auto it = bg.mynodes.begin(); it != bg.mynodes.end(); it++) {
+        if (it->second->color != 99) {
+            bg.rmNode(it->second);
+        }
+    }
 }
 
-void Show_graph(FILE* out,GRAPH::Graph<LLVMIR::L_block*>&bg){
-    for(auto block_node:bg.mynodes){
-        auto block=block_node.second->info;
-        fprintf(out,"%s \n",block->label->name.c_str());
-        fprintf(out,"pred  %zu  ",block_node.second->preds.size());
-        for(auto pred:block_node.second->preds){
-            fprintf(out,"%s  ",bg.mynodes[pred]->info->label->name.c_str());
+void Show_graph(FILE* out, GRAPH::Graph<LLVMIR::L_block*>& bg) {
+    for (auto block_node : bg.mynodes) {
+        auto block = block_node.second->info;
+        fprintf(out, "%s \n", block->label->name.c_str());
+        fprintf(out, "pred  %zu  ", block_node.second->preds.size());
+        for (auto pred : block_node.second->preds) {
+            fprintf(out, "%s  ", bg.mynodes[pred]->info->label->name.c_str());
         }
-        fprintf(out,"\n");
-        fprintf(out,"succ  %zu  ",block_node.second->succs.size());
-        for(auto succ:block_node.second->succs){
-            fprintf(out,"%s  ",bg.mynodes[succ]->info->label->name.c_str());
+        fprintf(out, "\n");
+        fprintf(out, "succ  %zu  ", block_node.second->succs.size());
+        for (auto succ : block_node.second->succs) {
+            fprintf(out, "%s  ", bg.mynodes[succ]->info->label->name.c_str());
         }
-        fprintf(out,"\n");
+        fprintf(out, "\n");
     }
 }
