@@ -248,17 +248,17 @@ bool DominatorIteration(GRAPH::Node<LLVMIR::L_block*>* r,
     unordered_set<L_block*> newDom;
     newDom.emplace(r->info);
     // 得到前驱的交集
-    unordered_set<L_block*> predUnion;
+    unordered_set<L_block*> predIntersection;
     for (int predId : r->preds) {
         GRAPH::Node<LLVMIR::L_block*>* node = bg.mynodes[predId];
-        predUnion = dom_intersection(predUnion, dominators[node->info]);
+        predIntersection =
+            dom_intersection(predIntersection, dominators[node->info]);
     }
     // 得到新Dom的完全体
-    newDom = dom_union(newDom, predUnion);
+    newDom = dom_union(newDom, predIntersection);
     // 判断自身是否发生变化
     bool needMoreIter = false;
     unordered_set<L_block*>& curDom = dominators[r->info];
-    // needMoreIter = needMoreIter || !dom_eq(curDom, newDom);
     needMoreIter = needMoreIter || (curDom != newDom);  // set直接用==判断
 
     // 深搜遍历其余节点
@@ -281,8 +281,24 @@ void Dominators(GRAPH::Graph<LLVMIR::L_block*>& bg) {
 
     // 清除颜色
     bg.clearColor();
-    bool changed = true;
+
     GRAPH::Node<LLVMIR::L_block*>* srcNode = bg.mynodes[0];
+    // 初始化dominators
+    dominators[srcNode->info].emplace(srcNode->info);
+    // 全部节点的集合
+    unordered_set<L_block*> allBlock;
+    for (auto it = bg.mynodes.begin(); it != bg.mynodes.end(); it++) {
+        allBlock.emplace(it->second->info);
+    }
+    for (auto it = bg.mynodes.begin(); it != bg.mynodes.end(); it++) {
+        // 其余节点必须包含所有节点。
+        if (dominators[it->second->info].size() == 0) {
+            dominators[it->second->info] = allBlock;
+        }
+    }
+
+    // 迭代更新
+    bool changed = true;
     int iterTimes = 0;
     while (changed) {
         changed = DominatorIteration(srcNode, bg, iterTimes);
