@@ -236,7 +236,7 @@ static void Use_def(GRAPH::Node<LLVMIR::L_block*>* r,
     //    args的作用尚不明确
     int dyeColor = 100;
     r->color = dyeColor;
-    // 该block的Use & Def
+    // 获取该block的Use & Def
     useDef curBlockUD = useDef();
     for (LLVMIR::L_stm* instr : r->info->instrs) {
         // 获取语句的def
@@ -266,7 +266,45 @@ static void Use_def(GRAPH::Node<LLVMIR::L_block*>* r,
 static int gi = 0;
 static bool LivenessIteration(GRAPH::Node<LLVMIR::L_block*>* r,
                               GRAPH::Graph<LLVMIR::L_block*>& bg) {
-    //    Todo
+    // 染色
+    int dyeColor = 299 + gi;
+    r->color = dyeColor;
+    // 针对自身进行iteration
+    // 1. 新建元素的inOut，如果已经有了则不插入
+    InOutTable.emplace(r, inOut());
+    // 2. 更新in和out
+    TempSet_& in = InOutTable[r].in;
+    TempSet_& out = InOutTable[r].out;
+    TempSet_& use = UseDefTable[r].use;
+    TempSet_& def = UseDefTable[r].def;
+    // 2.1 新in
+    TempSet outdefDiff = TempSet_diff(&out, &def);
+    TempSet newIn = TempSet_union(&use, outdefDiff);
+    // 2.2 新out
+    TempSet newOut = new TempSet_;
+    for (int succId : r->succs) {
+        GRAPH::Node<LLVMIR::L_block*>* nd = bg.mynodes[succId];
+        newOut = TempSet_union(newOut, &InOutTable[nd].in);
+    }
+    // 3 深搜后继
+    // neeMoreIter: 是否要继续下次迭代的变量。
+    // 真假取决于后继们是否发生变化和自身是否发生变化
+    bool needMoreIter = false;
+    // 遍历其它元素。
+    for (int succId : r->succs) {
+        GRAPH::Node<LLVMIR::L_block*>* nd = bg.mynodes[succId];
+        if (nd->color != dyeColor) {
+            // 后继们是否发生变化
+            needMoreIter = needMoreIter || LivenessIteration(nd, bg);
+        }
+    }
+    // 自身的in out是否发生变化
+    needMoreIter = needMoreIter || TempSet_eq(newIn, &in);
+    needMoreIter = needMoreIter || TempSet_eq(newOut, &out);
+    // 不管怎么样都要更新自身
+    in = *newIn;
+    out = *newOut;
+    return needMoreIter;
 }
 
 void PrintTemps(FILE* out, TempSet set) {
@@ -302,6 +340,9 @@ void Liveness(GRAPH::Node<LLVMIR::L_block*>* r,
     Use_def(r, bg, args);
     gi = 0;
     bool changed = true;
-    while (changed)
+    while (changed) {
         changed = LivenessIteration(r, bg);
+        // 一次DFS LivenessIteration之后，迭代次数gi++
+        gi++;
+    }
 }
